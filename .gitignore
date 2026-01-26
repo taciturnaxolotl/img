@@ -1,0 +1,12 @@
+node_modules/
+.wrangler/
+.dev.vars
+*.log
+
+# Bun
+bun.lockb
+package-lock.json
+
+# Extracted archive
+bg-remover-extracted/
+bg-remover (1).zip

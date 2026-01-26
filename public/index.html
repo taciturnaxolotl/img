@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Editor</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: system-ui, sans-serif;
+            max-width: 800px;
+            margin: 2rem auto;
+            padding: 1rem;
+        }
+        input, button, select {
+            padding: 0.5rem;
+            font-size: 1rem;
+        }
+        button { cursor: pointer; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .row {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        #tokenRow input { flex: 1; min-width: 200px; }
+        #drop {
+            border: 2px dashed #ccc;
+            padding: 3rem;
+            text-align: center;
+            cursor: pointer;
+            margin-bottom: 1rem;
+            border-radius: 8px;
+        }
+        #drop:hover { border-color: #666; }
+        #drop.over { border-color: #000; background: #f5f5f5; }
+        .hidden { display: none !important; }
+        #error {
+            color: #c00;
+            background: #fee;
+            padding: 0.75rem;
+            border-radius: 4px;
+            margin-bottom: 1rem;
+        }
+
+        /* Editor */
+        #editor { margin-bottom: 1rem; }
+        .toolbar {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+            padding: 0.5rem;
+            background: #f5f5f5;
+            border-radius: 4px;
+        }
+        .toolbar-group {
+            display: flex;
+            gap: 0.25rem;
+            align-items: center;
+        }
+        .toolbar-group::after {
+            content: '';
+            width: 1px;
+            height: 24px;
+            background: #ccc;
+            margin: 0 0.5rem;
+        }
+        .toolbar-group:last-child::after { display: none; }
+
+        .preview-area {
+            text-align: center;
+            min-height: 200px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .checker {
+            background: repeating-conic-gradient(#ddd 0% 25%, #fff 0% 50%) 50% / 16px 16px;
+            padding: 0.5rem;
+            display: inline-block;
+            border-radius: 4px;
+        }
+        #previewCanvas { max-width: 100%; max-height: 500px; }
+
+        /* Crop mode */
+        #cropMode {
+            position: relative;
+            display: inline-block;
+            user-select: none;
+        }
+        #cropCanvas { display: block; max-width: 100%; }
+        #overlayCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            cursor: crosshair;
+        }
+        .crop-controls {
+            margin-top: 1rem;
+            display: flex;
+            gap: 0.5rem;
+            justify-content: center;
+            align-items: center;
+        }
+
+        /* Status */
+        .status {
+            text-align: center;
+            padding: 1rem;
+            color: #666;
+        }
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 2px solid #ccc;
+            border-top-color: #333;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            vertical-align: middle;
+            margin-right: 0.5rem;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Color picker inline */
+        input[type="color"] {
+            width: 32px;
+            height: 32px;
+            padding: 0;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        label { font-size: 0.9rem; color: #666; display: flex; align-items: center; gap: 0.25rem; }
+
+        @media (max-width: 500px) {
+            body { margin: 1rem auto; padding: 0.5rem; }
+            .toolbar { flex-direction: column; }
+            .toolbar-group::after { display: none; }
+        }
+    </style>
+</head>
+<body>
+    <h2>Image Editor</h2>
+
+    <div class="row" id="tokenRow">
+        <input type="password" id="token" placeholder="Hack Club AI token" onkeydown="if(event.key==='Enter'){saveToken()}">
+        <button onclick="saveToken()">Save</button>
+    </div>
+
+    <div id="drop">Drop image or click, or paste</div>
+    <input type="file" id="file" accept="image/*" class="hidden">
+
+    <div id="error" class="hidden"></div>
+
+    <div id="editor" class="hidden">
+        <div class="toolbar">
+            <div class="toolbar-group">
+                <button onclick="startCrop()" id="cropBtn">Crop</button>
+            </div>
+            <div class="toolbar-group">
+                <button onclick="removeBg()" id="removeBgBtn">Remove BG</button>
+            </div>
+            <div class="toolbar-group">
+                <label>
+                    <input type="color" id="bgColor" value="#ffffff" onchange="applyBgColor()">
+                    Fill BG
+                </label>
+                <label>
+                    <input type="checkbox" id="showTransparent" checked onchange="updatePreview()">
+                    Transparent
+                </label>
+            </div>
+            <div class="toolbar-group">
+                <button onclick="downloadImage()">Download</button>
+                <button onclick="copyImage()">Copy</button>
+            </div>
+            <div class="toolbar-group">
+                <button onclick="resetAll()">New Image</button>
+            </div>
+        </div>
+
+        <div id="statusArea" class="status hidden">
+            <span class="spinner"></span><span id="statusText">Processing...</span>
+        </div>
+
+        <!-- Normal preview -->
+        <div id="previewArea" class="preview-area">
+            <div class="checker">
+                <canvas id="previewCanvas"></canvas>
+            </div>
+        </div>
+
+        <!-- Crop mode -->
+        <div id="cropArea" class="preview-area hidden">
+            <div>
+                <div id="cropMode">
+                    <canvas id="cropCanvas"></canvas>
+                    <canvas id="overlayCanvas"></canvas>
+                </div>
+                <div class="crop-controls">
+                    <label>Aspect:
+                        <select id="aspectRatio">
+                            <option value="free">Free</option>
+                            <option value="square">1:1</option>
+                            <option value="4:3">4:3</option>
+                            <option value="16:9">16:9</option>
+                        </select>
+                    </label>
+                    <button onclick="applyCrop()">Apply</button>
+                    <button onclick="cancelCrop()">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const HANDLE_SIZE = 10;
+        const SNAP_THRESHOLD = 8;
+
+        // State
+        let currentImage = null; // The current working image (Image object)
+        let displayScale = 1;
+        let crop = { x: 0, y: 0, w: 0, h: 0 };
+        let dragMode = null;
+        let dragStart = { x: 0, y: 0 };
+        let cropStart = { x: 0, y: 0, w: 0, h: 0 };
+        let inCropMode = false;
+
+        // Elements
+        const tokenRow = document.getElementById('tokenRow');
+        const tokenInput = document.getElementById('token');
+        const dropZone = document.getElementById('drop');
+        const fileInput = document.getElementById('file');
+        const errorDiv = document.getElementById('error');
+        const editor = document.getElementById('editor');
+        const previewArea = document.getElementById('previewArea');
+        const previewCanvas = document.getElementById('previewCanvas');
+        const cropArea = document.getElementById('cropArea');
+        const cropCanvas = document.getElementById('cropCanvas');
+        const overlayCanvas = document.getElementById('overlayCanvas');
+        const statusArea = document.getElementById('statusArea');
+        const statusText = document.getElementById('statusText');
+        const bgColor = document.getElementById('bgColor');
+        const showTransparent = document.getElementById('showTransparent');
+        const aspectRatio = document.getElementById('aspectRatio');
+
+        // Token handling
+        if (localStorage.getItem('hc_token')) {
+            tokenRow.classList.add('hidden');
+        }
+
+        function saveToken() {
+            localStorage.setItem('hc_token', tokenInput.value);
+            tokenRow.classList.add('hidden');
+        }
+
+        function showError(msg) {
+            errorDiv.textContent = msg;
+            errorDiv.classList.remove('hidden');
+        }
+
+        function hideError() {
+            errorDiv.classList.add('hidden');
+        }
+
+        function showStatus(msg) {
+            statusText.textContent = msg;
+            statusArea.classList.remove('hidden');
+        }
+
+        function hideStatus() {
+            statusArea.classList.add('hidden');
+        }
+
+        // File loading
+        dropZone.onclick = () => fileInput.click();
+        dropZone.ondragover = e => { e.preventDefault(); dropZone.classList.add('over'); };
+        dropZone.ondragleave = () => dropZone.classList.remove('over');
+        dropZone.ondrop = e => { e.preventDefault(); dropZone.classList.remove('over'); loadFile(e.dataTransfer.files[0]); };
+        fileInput.onchange = () => loadFile(fileInput.files[0]);
+
+        document.onpaste = e => {
+            const items = e.clipboardData?.items;
+            if (!items) return;
+            for (const item of items) {
+                if (item.type.startsWith('image/')) {
+                    loadFile(item.getAsFile());
+                    break;
+                }
+            }
+        };
+
+        function loadFile(f) {
+            if (!f) return;
+            hideError();
+            const reader = new FileReader();
+            reader.onload = e => {
+                const img = new Image();
+                img.onload = () => {
+                    currentImage = img;
+                    dropZone.classList.add('hidden');
+                    editor.classList.remove('hidden');
+                    updatePreview();
+                };
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(f);
+        }
+
+        function loadImageFromDataUrl(dataUrl) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => resolve(img);
+                img.onerror = reject;
+                img.src = dataUrl;
+            });
+        }
+
+        function updatePreview() {
+            if (!currentImage) return;
+
+            const ctx = previewCanvas.getContext('2d');
+            previewCanvas.width = currentImage.width;
+            previewCanvas.height = currentImage.height;
+
+            ctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+
+            if (!showTransparent.checked) {
+                ctx.fillStyle = bgColor.value;
+                ctx.fillRect(0, 0, previewCanvas.width, previewCanvas.height);
+            }
+
+            ctx.drawImage(currentImage, 0, 0);
+        }
+
+        function getCanvasDataUrl() {
+            return previewCanvas.toDataURL('image/png');
+        }
+
+        // Crop functionality
+        function startCrop() {
+            if (!currentImage) return;
+            inCropMode = true;
+
+            const maxW = Math.min(600, window.innerWidth - 40);
+            displayScale = Math.min(1, maxW / currentImage.width);
+            const w = currentImage.width * displayScale;
+            const h = currentImage.height * displayScale;
+
+            cropCanvas.width = overlayCanvas.width = w;
+            cropCanvas.height = overlayCanvas.height = h;
+            cropCanvas.getContext('2d').drawImage(currentImage, 0, 0, w, h);
+
+            crop = { x: 0, y: 0, w: 0, h: 0 };
+            drawOverlay();
+
+            previewArea.classList.add('hidden');
+            cropArea.classList.remove('hidden');
+        }
+
+        function cancelCrop() {
+            inCropMode = false;
+            cropArea.classList.add('hidden');
+            previewArea.classList.remove('hidden');
+        }
+
+        function applyCrop() {
+            const hasCrop = crop.w > 10 && crop.h > 10;
+            if (!hasCrop) {
+                cancelCrop();
+                return;
+            }
+
+            const sx = crop.x / displayScale;
+            const sy = crop.y / displayScale;
+            const sw = crop.w / displayScale;
+            const sh = crop.h / displayScale;
+
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = sw;
+            tempCanvas.height = sh;
+            tempCanvas.getContext('2d').drawImage(currentImage, sx, sy, sw, sh, 0, 0, sw, sh);
+
+            const img = new Image();
+            img.onload = () => {
+                currentImage = img;
+                inCropMode = false;
+                cropArea.classList.add('hidden');
+                previewArea.classList.remove('hidden');
+                updatePreview();
+            };
+            img.src = tempCanvas.toDataURL('image/png');
+        }
+
+        // Crop overlay logic
+        function getPos(e) {
+            const rect = overlayCanvas.getBoundingClientRect();
+            const pt = e.touches ? e.touches[0] : e;
+            return {
+                x: Math.max(0, Math.min(pt.clientX - rect.left, overlayCanvas.width)),
+                y: Math.max(0, Math.min(pt.clientY - rect.top, overlayCanvas.height))
+            };
+        }
+
+        function getHandle(pos) {
+            if (crop.w < 10 || crop.h < 10) return null;
+            const { x, y, w, h } = crop;
+            const mx = x + w / 2, my = y + h / 2;
+            const handles = [
+                { name: 'nw', hx: x, hy: y }, { name: 'n', hx: mx, hy: y },
+                { name: 'ne', hx: x + w, hy: y }, { name: 'e', hx: x + w, hy: my },
+                { name: 'se', hx: x + w, hy: y + h }, { name: 's', hx: mx, hy: y + h },
+                { name: 'sw', hx: x, hy: y + h }, { name: 'w', hx: x, hy: my },
+            ];
+            for (const hdl of handles) {
+                if (Math.abs(pos.x - hdl.hx) < HANDLE_SIZE && Math.abs(pos.y - hdl.hy) < HANDLE_SIZE) {
+                    return hdl.name;
+                }
+            }
+            if (pos.x > x && pos.x < x + w && pos.y > y && pos.y < y + h) return 'move';
+            return null;
+        }
+
+        function getCursor(handle) {
+            const cursors = {
+                nw: 'nwse-resize', se: 'nwse-resize', ne: 'nesw-resize', sw: 'nesw-resize',
+                n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize', move: 'move'
+            };
+            return cursors[handle] || 'crosshair';
+        }
+
+        overlayCanvas.onmousemove = e => {
+            if (dragMode) return;
+            overlayCanvas.style.cursor = getCursor(getHandle(getPos(e)));
+        };
+
+        overlayCanvas.onmousedown = overlayCanvas.ontouchstart = e => {
+            e.preventDefault();
+            const pos = getPos(e);
+            dragStart = pos;
+            cropStart = { ...crop };
+            const handle = getHandle(pos);
+            dragMode = handle || 'create';
+            if (!handle) crop = { x: pos.x, y: pos.y, w: 0, h: 0 };
+        };
+
+        function getAspectValue() {
+            const val = aspectRatio.value;
+            if (val === 'free') return null;
+            if (val === 'square') return 1;
+            if (val === '4:3') return 4/3;
+            if (val === '16:9') return 16/9;
+            return null;
+        }
+
+        document.onmousemove = document.ontouchmove = e => {
+            if (!dragMode || !inCropMode) return;
+            e.preventDefault();
+            const pos = getPos(e);
+            const dx = pos.x - dragStart.x;
+            const dy = pos.y - dragStart.y;
+            const cw = overlayCanvas.width;
+            const ch = overlayCanvas.height;
+            const aspect = getAspectValue();
+
+            if (dragMode === 'move') {
+                let nx = Math.max(0, Math.min(cropStart.x + dx, cw - cropStart.w));
+                let ny = Math.max(0, Math.min(cropStart.y + dy, ch - cropStart.h));
+                crop = { x: nx, y: ny, w: cropStart.w, h: cropStart.h };
+            } else if (dragMode === 'create') {
+                let x = Math.min(dragStart.x, pos.x);
+                let y = Math.min(dragStart.y, pos.y);
+                let w = Math.abs(dx);
+                let h = Math.abs(dy);
+                if (aspect) {
+                    if (w / h > aspect) w = h * aspect;
+                    else h = w / aspect;
+                    if (pos.x < dragStart.x) x = dragStart.x - w;
+                    if (pos.y < dragStart.y) y = dragStart.y - h;
+                }
+                crop = clampCrop({ x, y, w, h }, cw, ch);
+            } else {
+                let { x, y, w, h } = cropStart;
+                if (dragMode.includes('e')) w = cropStart.w + dx;
+                if (dragMode.includes('w')) { x = cropStart.x + dx; w = cropStart.w - dx; }
+                if (dragMode.includes('s')) h = cropStart.h + dy;
+                if (dragMode.includes('n')) { y = cropStart.y + dy; h = cropStart.h - dy; }
+                if (aspect) {
+                    if (Math.abs(w) / Math.abs(h) > aspect) {
+                        w = Math.sign(w) * Math.abs(h) * aspect;
+                        if (dragMode.includes('w')) x = cropStart.x + cropStart.w - Math.abs(w);
+                    } else {
+                        h = Math.sign(h) * Math.abs(w) / aspect;
+                        if (dragMode.includes('n')) y = cropStart.y + cropStart.h - Math.abs(h);
+                    }
+                }
+                if (w < 0) { x += w; w = -w; }
+                if (h < 0) { y += h; h = -h; }
+                crop = clampCrop({ x, y, w, h }, cw, ch);
+            }
+            drawOverlay();
+        };
+
+        document.onmouseup = document.ontouchend = () => { dragMode = null; };
+
+        function clampCrop(c, cw, ch) {
+            let { x, y, w, h } = c;
+            x = Math.max(0, x);
+            y = Math.max(0, y);
+            if (x + w > cw) w = cw - x;
+            if (y + h > ch) h = ch - y;
+            return { x, y, w, h };
+        }
+
+        function drawOverlay() {
+            const ctx = overlayCanvas.getContext('2d');
+            const cw = overlayCanvas.width;
+            const ch = overlayCanvas.height;
+            ctx.clearRect(0, 0, cw, ch);
+            if (crop.w > 5 && crop.h > 5) {
+                ctx.fillStyle = 'rgba(0,0,0,0.5)';
+                ctx.fillRect(0, 0, cw, crop.y);
+                ctx.fillRect(0, crop.y + crop.h, cw, ch - crop.y - crop.h);
+                ctx.fillRect(0, crop.y, crop.x, crop.h);
+                ctx.fillRect(crop.x + crop.w, crop.y, cw - crop.x - crop.w, crop.h);
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(crop.x, crop.y, crop.w, crop.h);
+                // Handles
+                const { x, y, w, h } = crop;
+                const mx = x + w / 2, my = y + h / 2;
+                const handles = [[x,y],[mx,y],[x+w,y],[x,my],[x+w,my],[x,y+h],[mx,y+h],[x+w,y+h]];
+                ctx.fillStyle = '#fff';
+                ctx.strokeStyle = '#333';
+                ctx.lineWidth = 1;
+                for (const [hx, hy] of handles) {
+                    ctx.fillRect(hx - HANDLE_SIZE/2, hy - HANDLE_SIZE/2, HANDLE_SIZE, HANDLE_SIZE);
+                    ctx.strokeRect(hx - HANDLE_SIZE/2, hy - HANDLE_SIZE/2, HANDLE_SIZE, HANDLE_SIZE);
+                }
+            }
+        }
+
+        // Remove background
+        async function removeBg() {
+            const tk = localStorage.getItem('hc_token') || tokenInput.value;
+            if (!tk) { showError('Enter token first'); return; }
+            if (!currentImage) return;
+
+            hideError();
+            showStatus('Removing background...');
+            document.getElementById('removeBgBtn').disabled = true;
+
+            // Get current image as data URL
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = currentImage.width;
+            tempCanvas.height = currentImage.height;
+            tempCanvas.getContext('2d').drawImage(currentImage, 0, 0);
+            const dataUrl = tempCanvas.toDataURL('image/png');
+
+            try {
+                const res = await fetch('/api/remove-bg', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ image: dataUrl, token: tk })
+                });
+                const data = await res.json();
+                if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error));
+
+                const img = new Image();
+                img.crossOrigin = 'anonymous';
+                img.onload = () => {
+                    currentImage = img;
+                    hideStatus();
+                    document.getElementById('removeBgBtn').disabled = false;
+                    updatePreview();
+                };
+                img.onerror = () => {
+                    hideStatus();
+                    document.getElementById('removeBgBtn').disabled = false;
+                    showError('Failed to load result image');
+                };
+                img.src = data.output;
+            } catch (e) {
+                hideStatus();
+                document.getElementById('removeBgBtn').disabled = false;
+                showError(e.message);
+            }
+        }
+
+        // Apply background color (bakes it into the image)
+        function applyBgColor() {
+            if (!currentImage) return;
+
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = currentImage.width;
+            tempCanvas.height = currentImage.height;
+            const ctx = tempCanvas.getContext('2d');
+
+            ctx.fillStyle = bgColor.value;
+            ctx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+            ctx.drawImage(currentImage, 0, 0);
+
+            const img = new Image();
+            img.onload = () => {
+                currentImage = img;
+                updatePreview();
+            };
+            img.src = tempCanvas.toDataURL('image/png');
+        }
+
+        // Download
+        function downloadImage() {
+            const a = document.createElement('a');
+            a.href = getCanvasDataUrl();
+            a.download = 'edited-image.png';
+            a.click();
+        }
+
+        // Copy
+        async function copyImage() {
+            try {
+                const blob = await new Promise(r => previewCanvas.toBlob(r, 'image/png'));
+                await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+            } catch (e) {
+                showError('Copy failed: ' + e.message);
+            }
+        }
+
+        // Reset
+        function resetAll() {
+            currentImage = null;
+            inCropMode = false;
+            editor.classList.add('hidden');
+            dropZone.classList.remove('hidden');
+            cropArea.classList.add('hidden');
+            previewArea.classList.remove('hidden');
+            hideError();
+            hideStatus();
+            fileInput.value = '';
+        }
+    </script>
+</body>
+</html>
