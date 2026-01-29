@@ -83,7 +83,7 @@
             display: inline-block;
             border-radius: 4px;
         }
-        #previewCanvas { max-width: 100%; max-height: 500px; }
+        #previewCanvas { max-width: 100%; max-height: 500px; display: block; }
 
         /* Crop mode */
         #cropMode {
@@ -198,6 +198,13 @@
                 <button onclick="startCrop()" id="cropBtn">Crop</button>
             </div>
             <div class="toolbar-group">
+                <label>
+                    Model:
+                    <select id="bgRemoverModel">
+                        <option value="lucataco">Lucataco (default)</option>
+                        <option value="851labs">851-labs</option>
+                    </select>
+                </label>
                 <button onclick="removeBg()" id="removeBgBtn">Remove BG</button>
             </div>
             <div class="toolbar-group">
@@ -221,6 +228,7 @@
                     <input type="number" id="maxDimension" value="2048" min="100" max="8192" style="width: 70px;">
                     px
                 </label>
+                <label style="font-size: 0.75rem; color: #999;">(scales down only)</label>
                 <button onclick="optimizeImage()">Optimize</button>
             </div>
             <div class="toolbar-group">
@@ -372,9 +380,26 @@
         function updatePreview() {
             if (!currentImage) return;
 
+            // Calculate dimensions to fit the screen while maintaining aspect ratio
+            const maxDisplayWidth = Math.min(700, window.innerWidth - 80);
+            const maxDisplayHeight = 500;
+            const imgAspect = currentImage.width / currentImage.height;
+            const maxAspect = maxDisplayWidth / maxDisplayHeight;
+            
+            let displayWidth, displayHeight;
+            if (imgAspect > maxAspect) {
+                displayWidth = Math.min(currentImage.width, maxDisplayWidth);
+                displayHeight = displayWidth / imgAspect;
+            } else {
+                displayHeight = Math.min(currentImage.height, maxDisplayHeight);
+                displayWidth = displayHeight * imgAspect;
+            }
+
             const ctx = previewCanvas.getContext('2d');
             previewCanvas.width = currentImage.width;
             previewCanvas.height = currentImage.height;
+            previewCanvas.style.width = displayWidth + 'px';
+            previewCanvas.style.height = displayHeight + 'px';
 
             ctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
 
@@ -610,11 +635,14 @@
             tempCanvas.getContext('2d').drawImage(currentImage, 0, 0);
             const dataUrl = tempCanvas.toDataURL('image/png');
 
+            // Get selected model
+            const selectedModel = document.getElementById('bgRemoverModel').value;
+
             try {
                 const res = await fetch('/api/remove-bg', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ image: dataUrl, token: tk })
+                    body: JSON.stringify({ image: dataUrl, token: tk, model: selectedModel })
                 });
                 const data = await res.json();
                 if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error));
@@ -703,10 +731,11 @@
             const quality = document.getElementById('optimizeQuality').value / 100;
             const maxDim = parseInt(document.getElementById('maxDimension').value) || 2048;
 
-            // Calculate new dimensions (maintain aspect ratio)
+            // Calculate new dimensions (only scale down if larger than maxDim)
             let newW = currentImage.width;
             let newH = currentImage.height;
 
+            // Only resize if image exceeds maxDim
             if (newW > maxDim || newH > maxDim) {
                 if (newW > newH) {
                     newH = Math.round(newH * (maxDim / newW));
@@ -716,6 +745,7 @@
                     newH = maxDim;
                 }
             }
+            // If image is already smaller than maxDim, keep original dimensions
 
             // Create optimized canvas
             const tempCanvas = document.createElement('canvas');

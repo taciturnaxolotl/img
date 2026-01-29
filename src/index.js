@@ -23,7 +23,7 @@ export default {
 
 async function handleRemoveBg(request, env) {
   try {
-    const { image, token } = await request.json();
+    const { image, token, model } = await request.json();
 
     if (!token) {
       return jsonResponse({ error: "Missing token" }, 400);
@@ -40,10 +40,12 @@ async function handleRemoveBg(request, env) {
 
     const input = { image };
 
-    const output = await replicate.run(
-      "lucataco/remove-bg:95fcc2a26d3899cd6c2691c900465aaeff466285a65c14638cc5f36f34befaf1",
-      { input }
-    );
+    // Select model based on parameter
+    const modelId = model === '851labs' 
+      ? "851-labs/background-remover:a029dff38972b5fda4ec5d75d7d1cd25aeff621d2cf4946a41055d7db66b80bc"
+      : "lucataco/remove-bg:95fcc2a26d3899cd6c2691c900465aaeff466285a65c14638cc5f36f34befaf1";
+
+    const output = await replicate.run(modelId, { input });
 
     // Handle different output formats
     let outputUrl;
