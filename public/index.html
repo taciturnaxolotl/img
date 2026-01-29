@@ -112,6 +112,16 @@
             padding: 1rem;
             color: #666;
         }
+        .file-info {
+            text-align: center;
+            padding: 0.5rem;
+            color: #666;
+            font-size: 0.9rem;
+            background: #f9f9f9;
+            border-radius: 4px;
+            margin-bottom: 1rem;
+        }
+        .file-info strong { color: #333; }
         .spinner {
             display: inline-block;
             width: 20px;
@@ -240,9 +250,7 @@
             </div>
         </div>
 
-        <div id="statusArea" class="status hidden">
-            <span class="spinner"></span><span id="statusText">Processing...</span>
-        </div>
+        <div id="fileInfo" class="file-info hidden"></div>
 
         <!-- Normal preview -->
         <div id="previewArea" class="preview-area">
@@ -272,6 +280,10 @@
                 </div>
             </div>
         </div>
+
+        <div id="statusArea" class="status hidden">
+            <span class="spinner"></span><span id="statusText">Processing...</span>
+        </div>
     </div>
 
     <script>
@@ -286,6 +298,7 @@
         let dragStart = { x: 0, y: 0 };
         let cropStart = { x: 0, y: 0, w: 0, h: 0 };
         let inCropMode = false;
+        let currentFileSize = 0;
 
         // Elements
         const tokenRow = document.getElementById('tokenRow');
@@ -304,6 +317,7 @@
         const bgColor = document.getElementById('bgColor');
         const showTransparent = document.getElementById('showTransparent');
         const aspectRatio = document.getElementById('aspectRatio');
+        const fileInfo = document.getElementById('fileInfo');
 
         // Token handling
         if (localStorage.getItem('hc_token')) {
@@ -311,8 +325,18 @@
         }
 
         function saveToken() {
-            localStorage.setItem('hc_token', tokenInput.value);
+            const token = tokenInput.value.trim();
+            
+            // Validate token format: sk-hc-v1-<64 hex chars>
+            const tokenRegex = /^sk-hc-v1-[a-f0-9]{64}$/i;
+            if (!tokenRegex.test(token)) {
+                showError('Invalid token format. Expected: sk-hc-v1-<64 hex characters>');
+                return;
+            }
+            
+            localStorage.setItem('hc_token', token);
             tokenRow.classList.add('hidden');
+            hideError();
         }
 
         function showError(msg) {
@@ -354,6 +378,7 @@
         function loadFile(f) {
             if (!f) return;
             hideError();
+            currentFileSize = f.size;
             const reader = new FileReader();
             reader.onload = e => {
                 const img = new Image();
@@ -362,6 +387,7 @@
                     dropZone.classList.add('hidden');
                     editor.classList.remove('hidden');
                     updatePreview();
+                    updateFileInfo();
                 };
                 img.src = e.target.result;
             };
@@ -409,6 +435,42 @@
             }
 
             ctx.drawImage(currentImage, 0, 0);
+            updateFileInfo();
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
+        }
+
+        function getCanvasSize() {
+            return new Promise(resolve => {
+                previewCanvas.toBlob(blob => resolve(blob.size), 'image/png');
+            });
+        }
+
+        async function updateFileInfo() {
+            if (!currentImage) {
+                fileInfo.classList.add('hidden');
+                return;
+            }
+
+            const currentSize = await getCanvasSize();
+            const dims = `${currentImage.width}×${currentImage.height}px`;
+            
+            let info = `<strong>Dimensions:</strong> ${dims} | <strong>Current size:</strong> ${formatFileSize(currentSize)}`;
+            
+            if (currentFileSize && currentFileSize !== currentSize) {
+                const diff = currentSize - currentFileSize;
+                const percent = ((diff / currentFileSize) * 100).toFixed(1);
+                const color = diff > 0 ? '#c00' : '#0a0';
+                info += ` | <strong>Original:</strong> ${formatFileSize(currentFileSize)} `;
+                info += `<span style="color: ${color}">(${diff > 0 ? '+' : ''}${percent}%)</span>`;
+            }
+            
+            fileInfo.innerHTML = info;
+            fileInfo.classList.remove('hidden');
         }
 
         function getCanvasDataUrl() {
@@ -460,8 +522,12 @@
             tempCanvas.getContext('2d').drawImage(currentImage, sx, sy, sw, sh, 0, 0, sw, sh);
 
             const img = new Image();
-            img.onload = () => {
+            img.onload = async () => {
                 currentImage = img;
+                // Update file size after crop
+                currentFileSize = await new Promise(resolve => {
+                    tempCanvas.toBlob(blob => resolve(blob.size), 'image/png');
+                });
                 inCropMode = false;
                 cropArea.classList.add('hidden');
                 previewArea.classList.remove('hidden');
@@ -618,14 +684,22 @@
             }
         }
 
-        // Remove background
+        // Remove background with polling
         async function removeBg() {
-            const tk = localStorage.getItem('hc_token') || tokenInput.value;
+            const tk = localStorage.getItem('hc_token') || tokenInput.value.trim();
             if (!tk) { showError('Enter token first'); return; }
+            
+            // Validate token format
+            const tokenRegex = /^sk-hc-v1-[a-f0-9]{64}$/i;
+            if (!tokenRegex.test(tk)) {
+                showError('Invalid token format. Expected: sk-hc-v1-<64 hex characters>');
+                return;
+            }
+            
             if (!currentImage) return;
 
             hideError();
-            showStatus('Removing background...');
+            showStatus('Starting background removal...');
             document.getElementById('removeBgBtn').disabled = true;
 
             // Get current image as data URL
@@ -639,6 +713,7 @@
             const selectedModel = document.getElementById('bgRemoverModel').value;
 
             try {
+                // Start the prediction
                 const res = await fetch('/api/remove-bg', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -647,25 +722,100 @@
                 const data = await res.json();
                 if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error));
 
-                const img = new Image();
-                img.crossOrigin = 'anonymous';
-                img.onload = () => {
-                    currentImage = img;
-                    hideStatus();
-                    document.getElementById('removeBgBtn').disabled = false;
-                    updatePreview();
-                };
-                img.onerror = () => {
-                    hideStatus();
-                    document.getElementById('removeBgBtn').disabled = false;
-                    showError('Failed to load result image');
-                };
-                img.src = data.output;
+                // Check if we got direct output (no polling needed) or prediction ID
+                if (data.predictionId) {
+                    // Poll for status
+                    await pollStatus(data.predictionId, tk);
+                } else if (data.status === 'succeeded' && data.output) {
+                    // Direct output, load immediately
+                    const img = new Image();
+                    img.crossOrigin = 'anonymous';
+                    img.onload = async () => {
+                        currentImage = img;
+                        currentFileSize = await new Promise(resolve => {
+                            const tempCanvas = document.createElement('canvas');
+                            tempCanvas.width = img.width;
+                            tempCanvas.height = img.height;
+                            tempCanvas.getContext('2d').drawImage(img, 0, 0);
+                            tempCanvas.toBlob(blob => resolve(blob.size), 'image/png');
+                        });
+                        hideStatus();
+                        document.getElementById('removeBgBtn').disabled = false;
+                        updatePreview();
+                    };
+                    img.onerror = () => {
+                        hideStatus();
+                        document.getElementById('removeBgBtn').disabled = false;
+                        showError('Failed to load result image');
+                    };
+                    img.src = data.output;
+                }
             } catch (e) {
                 hideStatus();
                 document.getElementById('removeBgBtn').disabled = false;
                 showError(e.message);
             }
+        }
+
+        async function pollStatus(predictionId, token) {
+            const startTime = Date.now();
+            
+            const poll = async () => {
+                try {
+                    const res = await fetch(`/api/check-status?id=${predictionId}&token=${encodeURIComponent(token)}`);
+                    const data = await res.json();
+                    
+                    if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error));
+
+                    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                    
+                    if (data.status === 'succeeded') {
+                        showStatus(`Processing complete (${elapsed}s)`);
+                        
+                        const img = new Image();
+                        img.crossOrigin = 'anonymous';
+                        img.onload = async () => {
+                            currentImage = img;
+                            // Reset currentFileSize to the new processed image size
+                            currentFileSize = await new Promise(resolve => {
+                                const tempCanvas = document.createElement('canvas');
+                                tempCanvas.width = img.width;
+                                tempCanvas.height = img.height;
+                                tempCanvas.getContext('2d').drawImage(img, 0, 0);
+                                tempCanvas.toBlob(blob => resolve(blob.size), 'image/png');
+                            });
+                            hideStatus();
+                            document.getElementById('removeBgBtn').disabled = false;
+                            updatePreview();
+                        };
+                        img.onerror = () => {
+                            hideStatus();
+                            document.getElementById('removeBgBtn').disabled = false;
+                            showError('Failed to load result image');
+                        };
+                        img.src = data.output;
+                    } else if (data.status === 'failed') {
+                        hideStatus();
+                        document.getElementById('removeBgBtn').disabled = false;
+                        showError(data.error || 'Background removal failed');
+                    } else if (data.status === 'processing' || data.status === 'starting') {
+                        showStatus(`Processing... ${elapsed}s elapsed`);
+                        // Poll again in 2 seconds
+                        setTimeout(poll, 2000);
+                    } else {
+                        // Unknown status, keep polling
+                        showStatus(`Status: ${data.status} (${elapsed}s)`);
+                        setTimeout(poll, 2000);
+                    }
+                } catch (e) {
+                    hideStatus();
+                    document.getElementById('removeBgBtn').disabled = false;
+                    showError(e.message);
+                }
+            };
+
+            // Start polling
+            poll();
         }
 
         // Apply background color (bakes it into the image)
@@ -682,8 +832,12 @@
             ctx.drawImage(currentImage, 0, 0);
 
             const img = new Image();
-            img.onload = () => {
+            img.onload = async () => {
                 currentImage = img;
+                // Update file size after applying bg color
+                currentFileSize = await new Promise(resolve => {
+                    tempCanvas.toBlob(blob => resolve(blob.size), 'image/png');
+                });
                 updatePreview();
             };
             img.src = tempCanvas.toDataURL('image/png');
@@ -710,6 +864,7 @@
         // Reset
         function resetAll() {
             currentImage = null;
+            currentFileSize = 0;
             inCropMode = false;
             editor.classList.add('hidden');
             dropZone.classList.remove('hidden');
@@ -717,6 +872,7 @@
             previewArea.classList.remove('hidden');
             hideError();
             hideStatus();
+            fileInfo.classList.add('hidden');
             fileInput.value = '';
         }
 
@@ -759,8 +915,12 @@
 
             // Load back as current image
             const img = new Image();
-            img.onload = () => {
+            img.onload = async () => {
                 currentImage = img;
+                // Update file size after optimization
+                currentFileSize = await new Promise(resolve => {
+                    tempCanvas.toBlob(blob => resolve(blob.size), 'image/jpeg', quality);
+                });
                 updatePreview();
             };
             img.src = optimized;
