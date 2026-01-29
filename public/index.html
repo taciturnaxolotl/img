@@ -699,7 +699,7 @@
             if (!currentImage) return;
 
             hideError();
-            showStatus('Starting background removal...');
+            showStatus('Removing background...');
             document.getElementById('removeBgBtn').disabled = true;
 
             // Get current image as data URL
@@ -713,7 +713,6 @@
             const selectedModel = document.getElementById('bgRemoverModel').value;
 
             try {
-                // Start the prediction
                 const res = await fetch('/api/remove-bg', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -722,100 +721,33 @@
                 const data = await res.json();
                 if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error));
 
-                // Check if we got direct output (no polling needed) or prediction ID
-                if (data.predictionId) {
-                    // Poll for status
-                    await pollStatus(data.predictionId, tk);
-                } else if (data.status === 'succeeded' && data.output) {
-                    // Direct output, load immediately
-                    const img = new Image();
-                    img.crossOrigin = 'anonymous';
-                    img.onload = async () => {
-                        currentImage = img;
-                        currentFileSize = await new Promise(resolve => {
-                            const tempCanvas = document.createElement('canvas');
-                            tempCanvas.width = img.width;
-                            tempCanvas.height = img.height;
-                            tempCanvas.getContext('2d').drawImage(img, 0, 0);
-                            tempCanvas.toBlob(blob => resolve(blob.size), 'image/png');
-                        });
-                        hideStatus();
-                        document.getElementById('removeBgBtn').disabled = false;
-                        updatePreview();
-                    };
-                    img.onerror = () => {
-                        hideStatus();
-                        document.getElementById('removeBgBtn').disabled = false;
-                        showError('Failed to load result image');
-                    };
-                    img.src = data.output;
-                }
+                const img = new Image();
+                img.crossOrigin = 'anonymous';
+                img.onload = async () => {
+                    currentImage = img;
+                    // Reset currentFileSize to the new processed image size
+                    currentFileSize = await new Promise(resolve => {
+                        const tempCanvas = document.createElement('canvas');
+                        tempCanvas.width = img.width;
+                        tempCanvas.height = img.height;
+                        tempCanvas.getContext('2d').drawImage(img, 0, 0);
+                        tempCanvas.toBlob(blob => resolve(blob.size), 'image/png');
+                    });
+                    hideStatus();
+                    document.getElementById('removeBgBtn').disabled = false;
+                    updatePreview();
+                };
+                img.onerror = () => {
+                    hideStatus();
+                    document.getElementById('removeBgBtn').disabled = false;
+                    showError('Failed to load result image');
+                };
+                img.src = data.output;
             } catch (e) {
                 hideStatus();
                 document.getElementById('removeBgBtn').disabled = false;
                 showError(e.message);
             }
-        }
-
-        async function pollStatus(predictionId, token) {
-            const startTime = Date.now();
-            
-            const poll = async () => {
-                try {
-                    const res = await fetch(`/api/check-status?id=${predictionId}&token=${encodeURIComponent(token)}`);
-                    const data = await res.json();
-                    
-                    if (!res.ok) throw new Error(typeof data.error === 'string' ? data.error : JSON.stringify(data.error));
-
-                    const elapsed = Math.floor((Date.now() - startTime) / 1000);
-                    
-                    if (data.status === 'succeeded') {
-                        showStatus(`Processing complete (${elapsed}s)`);
-                        
-                        const img = new Image();
-                        img.crossOrigin = 'anonymous';
-                        img.onload = async () => {
-                            currentImage = img;
-                            // Reset currentFileSize to the new processed image size
-                            currentFileSize = await new Promise(resolve => {
-                                const tempCanvas = document.createElement('canvas');
-                                tempCanvas.width = img.width;
-                                tempCanvas.height = img.height;
-                                tempCanvas.getContext('2d').drawImage(img, 0, 0);
-                                tempCanvas.toBlob(blob => resolve(blob.size), 'image/png');
-                            });
-                            hideStatus();
-                            document.getElementById('removeBgBtn').disabled = false;
-                            updatePreview();
-                        };
-                        img.onerror = () => {
-                            hideStatus();
-                            document.getElementById('removeBgBtn').disabled = false;
-                            showError('Failed to load result image');
-                        };
-                        img.src = data.output;
-                    } else if (data.status === 'failed') {
-                        hideStatus();
-                        document.getElementById('removeBgBtn').disabled = false;
-                        showError(data.error || 'Background removal failed');
-                    } else if (data.status === 'processing' || data.status === 'starting') {
-                        showStatus(`Processing... ${elapsed}s elapsed`);
-                        // Poll again in 2 seconds
-                        setTimeout(poll, 2000);
-                    } else {
-                        // Unknown status, keep polling
-                        showStatus(`Status: ${data.status} (${elapsed}s)`);
-                        setTimeout(poll, 2000);
-                    }
-                } catch (e) {
-                    hideStatus();
-                    document.getElementById('removeBgBtn').disabled = false;
-                    showError(e.message);
-                }
-            };
-
-            // Start polling
-            poll();
         }
 
         // Apply background color (bakes it into the image)
