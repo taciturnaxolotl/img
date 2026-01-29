@@ -246,6 +246,7 @@
                 <button onclick="copyImage()">Copy</button>
             </div>
             <div class="toolbar-group">
+                <button onclick="undoOperation()" id="undoBtn" disabled>Undo</button>
                 <button onclick="resetAll()">New Image</button>
             </div>
         </div>
@@ -290,8 +291,9 @@
         const HANDLE_SIZE = 10;
         const SNAP_THRESHOLD = 8;
 
-        // State
-        let currentImage = null; // The current working image (Image object)
+        // State - Layer system
+        let originalImage = null; // Never modified
+        let operations = []; // Stack of operations to apply
         let displayScale = 1;
         let crop = { x: 0, y: 0, w: 0, h: 0 };
         let dragMode = null;
@@ -383,11 +385,11 @@
             reader.onload = e => {
                 const img = new Image();
                 img.onload = () => {
-                    currentImage = img;
+                    originalImage = img;
+                    operations = []; // Reset operations
                     dropZone.classList.add('hidden');
                     editor.classList.remove('hidden');
-                    updatePreview();
-                    updateFileInfo();
+                    renderLayers();
                 };
                 img.src = e.target.result;
             };
@@ -403,39 +405,82 @@
             });
         }
 
-        function updatePreview() {
-            if (!currentImage) return;
+        // Render pipeline: apply all operations to get final image
+        async function renderLayers() {
+            if (!originalImage) return;
 
-            // Calculate dimensions to fit the screen while maintaining aspect ratio
+            let sourceImage = originalImage;
+            let width = originalImage.width;
+            let height = originalImage.height;
+
+            // Apply operations in order
+            for (const op of operations) {
+                if (op.type === 'removeBg') {
+                    sourceImage = op.image;
+                    width = sourceImage.width;
+                    height = sourceImage.height;
+                } else if (op.type === 'crop') {
+                    // Crop will be applied during render
+                    width = op.w;
+                    height = op.h;
+                }
+            }
+
+            // Find active operations
+            const bgRemoveOp = operations.find(op => op.type === 'removeBg');
+            const cropOp = operations.find(op => op.type === 'crop');
+            const bgColorOp = operations.find(op => op.type === 'bgColor');
+
+            // Set canvas dimensions
+            const ctx = previewCanvas.getContext('2d');
+            previewCanvas.width = width;
+            previewCanvas.height = height;
+
+            // Calculate display size
             const maxDisplayWidth = Math.min(700, window.innerWidth - 80);
             const maxDisplayHeight = 500;
-            const imgAspect = currentImage.width / currentImage.height;
+            const imgAspect = width / height;
             const maxAspect = maxDisplayWidth / maxDisplayHeight;
             
             let displayWidth, displayHeight;
             if (imgAspect > maxAspect) {
-                displayWidth = Math.min(currentImage.width, maxDisplayWidth);
+                displayWidth = Math.min(width, maxDisplayWidth);
                 displayHeight = displayWidth / imgAspect;
             } else {
-                displayHeight = Math.min(currentImage.height, maxDisplayHeight);
+                displayHeight = Math.min(height, maxDisplayHeight);
                 displayWidth = displayHeight * imgAspect;
             }
 
-            const ctx = previewCanvas.getContext('2d');
-            previewCanvas.width = currentImage.width;
-            previewCanvas.height = currentImage.height;
             previewCanvas.style.width = displayWidth + 'px';
             previewCanvas.style.height = displayHeight + 'px';
 
-            ctx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+            ctx.clearRect(0, 0, width, height);
 
-            if (!showTransparent.checked) {
-                ctx.fillStyle = bgColor.value;
-                ctx.fillRect(0, 0, previewCanvas.width, previewCanvas.height);
+            // Apply background color if not showing transparent
+            if (!showTransparent.checked && (bgColorOp || bgRemoveOp)) {
+                ctx.fillStyle = bgColorOp ? bgColorOp.color : bgColor.value;
+                ctx.fillRect(0, 0, width, height);
             }
 
-            ctx.drawImage(currentImage, 0, 0);
-            updateFileInfo();
+            // Draw the image (with crop if applicable)
+            const imgToDraw = bgRemoveOp ? bgRemoveOp.image : originalImage;
+            
+            if (cropOp) {
+                // Draw cropped portion
+                ctx.drawImage(imgToDraw, cropOp.x, cropOp.y, cropOp.w, cropOp.h, 0, 0, width, height);
+            } else {
+                // Draw full image
+                ctx.drawImage(imgToDraw, 0, 0);
+            }
+
+            // Update undo button state
+            document.getElementById('undoBtn').disabled = operations.length === 0;
+
+            await updateFileInfo();
+        }
+
+        function updatePreview() {
+            renderLayers();
         }
 
         function formatFileSize(bytes) {
@@ -451,13 +496,13 @@
         }
 
         async function updateFileInfo() {
-            if (!currentImage) {
+            if (!originalImage) {
                 fileInfo.classList.add('hidden');
                 return;
             }
 
             const currentSize = await getCanvasSize();
-            const dims = `${currentImage.width}×${currentImage.height}px`;
+            const dims = `${previewCanvas.width}×${previewCanvas.height}px`;
             
             let info = `<strong>Dimensions:</strong> ${dims} | <strong>Current size:</strong> ${formatFileSize(currentSize)}`;
             
@@ -479,23 +524,44 @@
 
         // Crop functionality
         function startCrop() {
-            if (!currentImage) return;
+            if (!originalImage) return;
             inCropMode = true;
 
+            // Get current rendered image
+            const currentImg = getCurrentImage();
+
             const maxW = Math.min(600, window.innerWidth - 40);
-            displayScale = Math.min(1, maxW / currentImage.width);
-            const w = currentImage.width * displayScale;
-            const h = currentImage.height * displayScale;
+            displayScale = Math.min(1, maxW / currentImg.width);
+            const w = currentImg.width * displayScale;
+            const h = currentImg.height * displayScale;
 
             cropCanvas.width = overlayCanvas.width = w;
             cropCanvas.height = overlayCanvas.height = h;
-            cropCanvas.getContext('2d').drawImage(currentImage, 0, 0, w, h);
+            cropCanvas.getContext('2d').drawImage(currentImg, 0, 0, w, h);
 
-            crop = { x: 0, y: 0, w: 0, h: 0 };
+            // Find existing crop if any
+            const existingCrop = operations.find(op => op.type === 'crop');
+            if (existingCrop) {
+                crop = {
+                    x: existingCrop.x * displayScale,
+                    y: existingCrop.y * displayScale,
+                    w: existingCrop.w * displayScale,
+                    h: existingCrop.h * displayScale
+                };
+            } else {
+                crop = { x: 0, y: 0, w: 0, h: 0 };
+            }
+            
             drawOverlay();
 
             previewArea.classList.add('hidden');
             cropArea.classList.remove('hidden');
+        }
+
+        function getCurrentImage() {
+            // Return the current state of the image (with bg removal if applied)
+            const bgRemoveOp = operations.find(op => op.type === 'removeBg');
+            return bgRemoveOp ? bgRemoveOp.image : originalImage;
         }
 
         function cancelCrop() {
@@ -516,24 +582,22 @@
             const sw = crop.w / displayScale;
             const sh = crop.h / displayScale;
 
-            const tempCanvas = document.createElement('canvas');
-            tempCanvas.width = sw;
-            tempCanvas.height = sh;
-            tempCanvas.getContext('2d').drawImage(currentImage, sx, sy, sw, sh, 0, 0, sw, sh);
+            // Remove existing crop operation if any
+            operations = operations.filter(op => op.type !== 'crop');
+            
+            // Add new crop operation
+            operations.push({
+                type: 'crop',
+                x: sx,
+                y: sy,
+                w: sw,
+                h: sh
+            });
 
-            const img = new Image();
-            img.onload = async () => {
-                currentImage = img;
-                // Update file size after crop
-                currentFileSize = await new Promise(resolve => {
-                    tempCanvas.toBlob(blob => resolve(blob.size), 'image/png');
-                });
-                inCropMode = false;
-                cropArea.classList.add('hidden');
-                previewArea.classList.remove('hidden');
-                updatePreview();
-            };
-            img.src = tempCanvas.toDataURL('image/png');
+            inCropMode = false;
+            cropArea.classList.add('hidden');
+            previewArea.classList.remove('hidden');
+            renderLayers();
         }
 
         // Crop overlay logic
@@ -684,7 +748,7 @@
             }
         }
 
-        // Remove background with polling
+        // Remove background
         async function removeBg() {
             const tk = localStorage.getItem('hc_token') || tokenInput.value.trim();
             if (!tk) { showError('Enter token first'); return; }
@@ -696,17 +760,17 @@
                 return;
             }
             
-            if (!currentImage) return;
+            if (!originalImage) return;
 
             hideError();
             showStatus('Removing background...');
             document.getElementById('removeBgBtn').disabled = true;
 
-            // Get current image as data URL
+            // Always work with the original image for background removal
             const tempCanvas = document.createElement('canvas');
-            tempCanvas.width = currentImage.width;
-            tempCanvas.height = currentImage.height;
-            tempCanvas.getContext('2d').drawImage(currentImage, 0, 0);
+            tempCanvas.width = originalImage.width;
+            tempCanvas.height = originalImage.height;
+            tempCanvas.getContext('2d').drawImage(originalImage, 0, 0);
             const dataUrl = tempCanvas.toDataURL('image/png');
 
             // Get selected model
@@ -723,19 +787,19 @@
 
                 const img = new Image();
                 img.crossOrigin = 'anonymous';
-                img.onload = async () => {
-                    currentImage = img;
-                    // Reset currentFileSize to the new processed image size
-                    currentFileSize = await new Promise(resolve => {
-                        const tempCanvas = document.createElement('canvas');
-                        tempCanvas.width = img.width;
-                        tempCanvas.height = img.height;
-                        tempCanvas.getContext('2d').drawImage(img, 0, 0);
-                        tempCanvas.toBlob(blob => resolve(blob.size), 'image/png');
+                img.onload = () => {
+                    // Remove existing bg removal operation if any
+                    operations = operations.filter(op => op.type !== 'removeBg');
+                    
+                    // Add new bg removal operation
+                    operations.push({
+                        type: 'removeBg',
+                        image: img
                     });
+
                     hideStatus();
                     document.getElementById('removeBgBtn').disabled = false;
-                    updatePreview();
+                    renderLayers();
                 };
                 img.onerror = () => {
                     hideStatus();
@@ -750,29 +814,20 @@
             }
         }
 
-        // Apply background color (bakes it into the image)
+        // Apply background color (non-destructive)
         function applyBgColor() {
-            if (!currentImage) return;
+            if (!originalImage) return;
 
-            const tempCanvas = document.createElement('canvas');
-            tempCanvas.width = currentImage.width;
-            tempCanvas.height = currentImage.height;
-            const ctx = tempCanvas.getContext('2d');
+            // Remove existing bg color operation if any
+            operations = operations.filter(op => op.type !== 'bgColor');
+            
+            // Add new bg color operation
+            operations.push({
+                type: 'bgColor',
+                color: bgColor.value
+            });
 
-            ctx.fillStyle = bgColor.value;
-            ctx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
-            ctx.drawImage(currentImage, 0, 0);
-
-            const img = new Image();
-            img.onload = async () => {
-                currentImage = img;
-                // Update file size after applying bg color
-                currentFileSize = await new Promise(resolve => {
-                    tempCanvas.toBlob(blob => resolve(blob.size), 'image/png');
-                });
-                updatePreview();
-            };
-            img.src = tempCanvas.toDataURL('image/png');
+            renderLayers();
         }
 
         // Download
@@ -793,9 +848,17 @@
             }
         }
 
+        // Undo last operation
+        function undoOperation() {
+            if (operations.length === 0) return;
+            operations.pop();
+            renderLayers();
+        }
+
         // Reset
         function resetAll() {
-            currentImage = null;
+            originalImage = null;
+            operations = [];
             currentFileSize = 0;
             inCropMode = false;
             editor.classList.add('hidden');
@@ -814,14 +877,17 @@
         };
 
         function optimizeImage() {
-            if (!currentImage) return;
+            if (!originalImage) return;
 
             const quality = document.getElementById('optimizeQuality').value / 100;
             const maxDim = parseInt(document.getElementById('maxDimension').value) || 2048;
 
-            // Calculate new dimensions (only scale down if larger than maxDim)
-            let newW = currentImage.width;
-            let newH = currentImage.height;
+            // Check if image has transparency (bg removed)
+            const hasTransparency = operations.some(op => op.type === 'removeBg');
+
+            // Get current canvas dimensions
+            let newW = previewCanvas.width;
+            let newH = previewCanvas.height;
 
             // Only resize if image exceeds maxDim
             if (newW > maxDim || newH > maxDim) {
@@ -833,29 +899,41 @@
                     newH = maxDim;
                 }
             }
-            // If image is already smaller than maxDim, keep original dimensions
 
             // Create optimized canvas
             const tempCanvas = document.createElement('canvas');
             tempCanvas.width = newW;
             tempCanvas.height = newH;
             const ctx = tempCanvas.getContext('2d');
-            ctx.drawImage(currentImage, 0, 0, newW, newH);
-
-            // Convert to JPEG with quality setting
-            const optimized = tempCanvas.toDataURL('image/jpeg', quality);
-
-            // Load back as current image
-            const img = new Image();
-            img.onload = async () => {
-                currentImage = img;
-                // Update file size after optimization
-                currentFileSize = await new Promise(resolve => {
-                    tempCanvas.toBlob(blob => resolve(blob.size), 'image/jpeg', quality);
-                });
-                updatePreview();
-            };
-            img.src = optimized;
+            
+            // If has transparency, use PNG; otherwise use JPEG
+            if (hasTransparency) {
+                // Scale down the preview canvas
+                ctx.drawImage(previewCanvas, 0, 0, newW, newH);
+                const optimized = tempCanvas.toDataURL('image/png');
+                
+                // Load back as original image (destructive - replaces original)
+                const img = new Image();
+                img.onload = () => {
+                    originalImage = img;
+                    operations = []; // Clear all operations since we're baking them in
+                    renderLayers();
+                };
+                img.src = optimized;
+            } else {
+                // No transparency, safe to use JPEG
+                ctx.drawImage(previewCanvas, 0, 0, newW, newH);
+                const optimized = tempCanvas.toDataURL('image/jpeg', quality);
+                
+                // Load back as original image
+                const img = new Image();
+                img.onload = () => {
+                    originalImage = img;
+                    operations = []; // Clear all operations
+                    renderLayers();
+                };
+                img.src = optimized;
+            }
         }
     </script>
 </body>
